@@ -1,0 +1,434 @@
+---
+title: "Clustering Depression Screening Data"
+author: "Bryan O."
+date: "5/23/2022"
+output: html_document
+---
+
+## Purpose
+
+The purpose of this exercise is to practice clustering survey data using the *k*-means clustering algorithm. I will be using data from the National Health and Nutrition Examination Survey (NHANES), a major program of the National Center for Health Statistics (NCHS), which is part of the Centers for Disease Control and Prevention (CDC). Ultimately I want to use *k*-means to segment survey respondents into different groups based on their responses to NHANES' depression screening questionnaire and see if I can isolate the respondents with moderate-to-severe depressive symptoms. By the end I hope to have successfully practiced applying *k*-means, tuning hyperparameters, and evaluating/interpreting the results.
+
+## Data
+
+The foundational data used in this exercise comes from NHANES program's 2017-March 2020 Pre-pandemic data. After doing a left joini of the depression screener data (P_DPQ) with the demographic data (P_DEMO) the dataset had the following data:
+
+-   SEQN - Respondent sequence number
+
+-   RIAGENDR - Gender
+
+-   RIDAGEYR - Age in years at screening
+
+-   RIDRETH3 - Race/Hispanic origin
+
+-   DMDBORN4 - Country of birth
+
+-   INDFMPIR - Ratio of family income to poverty
+
+-   DPQ010 - Have little interest in doing things
+
+-   DPQ020 - Feeling down, depressed, or hopeless
+
+-   DPQ030 - Trouble sleeping or sleeping too much
+
+-   DPQ040 - Feeling tired or having little energy
+
+-   DPQ050 - Poor appetite or overeating
+
+-   DPQ060 - Feeling bad about yourself
+
+-   DPQ070 - Trouble concentrating on things
+
+-   DPQ080 - Moving or speaking slowly or too fast
+
+-   DPQ090 - Thoughts you would be better off dead
+
+-   DPQ100 - Difficulty these problems have caused
+
+Links:
+
+<https://wwwn.cdc.gov/nchs/nhanes/search/datapage.aspx?Component=Demographics&Cycle=2017-2020>
+
+<https://wwwn.cdc.gov/nchs/nhanes/search/datapage.aspx?Component=Questionnaire&Cycle=2017-2020>
+
+## Import Data
+
+```{r}
+library(haven)
+library(factoextra)
+library(ggplot2)
+library(plotly)
+
+dep = read_xpt("/Users/bryanokani/Downloads/P_DPQ.xpt")
+demo = read_xpt("/Users/bryanokani/Downloads/P_DEMO.xpt")
+
+df = merge(dep, demo[ , c(1,4,5,8,10,29)], by = "SEQN", all.x = TRUE)
+head(df)
+```
+
+## Preprocessing
+
+### Omit NAs
+
+We currently have 8965 rows and 16 columns. Since we didn't import the entirety of the demographic dataframe we don't need to remove anymore variables.
+
+First, let's remove all the observations that have missing data (NAs). This brings the total number of observations down to 4833.
+
+```{r}
+df = na.omit(df)
+```
+
+### Omit certain responses
+
+Reading through the documentation from NHANES, we can see that for each of the survey questions in the depression screener, there are a certain number of interviewees who either responded with "Don't Know" (value of 7 or 77) or refused to respond (value of 9 or 99). I decided to remove these observations from the data as well.
+
+```{r}
+df = df[ !(df$DPQ010 == 7 | df$DPQ010 == 9) , ]
+df = df[ !(df$DPQ020 == 7 | df$DPQ020 == 9) , ]
+df = df[ !(df$DPQ030 == 7 | df$DPQ030 == 9) , ]
+df = df[ !(df$DPQ040 == 7 | df$DPQ040 == 9) , ]
+df = df[ !(df$DPQ050 == 7 | df$DPQ050 == 9) , ]
+df = df[ !(df$DPQ060 == 7 | df$DPQ060 == 9) , ]
+df = df[ !(df$DPQ070 == 7 | df$DPQ070 == 9) , ]
+df = df[ !(df$DPQ080 == 7 | df$DPQ080 == 9) , ]
+df = df[ !(df$DPQ090 == 7 | df$DPQ090 == 9) , ]
+df = df[ !(df$DPQ100 == 7 | df$DPQ100 == 9) , ]
+df = df[ !(df$DMDBORN4 == 77 | df$DMDBORN4 == 99) , ]
+```
+
+### Factoring categorical demographic variables
+
+The last step involves cleaning the categorical demographic columns. I want to factor these variables and rename the levels, as well as combine the Race/Hispanic Origin categories "Mexican American" and "Other Hispanic" into a singular "Hispanic" category for simplicity sake.
+
+```{r}
+#Gender
+df$RIAGENDR = as.factor(df$RIAGENDR)
+levels(df$RIAGENDR) = c("Male", "Female")
+
+#Race
+df$RIDRETH3[which(df$RIDRETH3 == 1)] <- 2
+df$RIDRETH3 = as.factor(df$RIDRETH3)
+levels(df$RIDRETH3) = c("Hispanic", "White", "Black", "Asian", "Other")
+
+#Country of Birth
+df$DMDBORN4 = as.factor(df$DMDBORN4)
+levels(df$DMDBORN4) = c("United States", "Other")
+```
+
+After all of that, our data is ready for analysis and clustering.
+
+## Exploratory Data Analysis of the Demographic Variables
+
+Before clustering, I want to observe the distribution of respondents across different demographics.
+
+### Gender
+
+```{r}
+ggplot(data = df, aes(RIAGENDR)) + 
+  geom_bar(fill="red", color="black") + 
+  xlab("Gender") +
+  ylab("Count of Respondents") + 
+  ggtitle("Distribution of Respondents across Gender")
+```
+
+### Age
+
+It is worth noting that, according to the documentation from NHANES, "due to disclosure concern, all responses of participants aged 80 years and older are coded as '80.' In NHANES 2017-March 2020 pre-pandemic sample, the weighted mean age for participants 80 years and older is 85 years."
+
+```{r}
+ggplot(df, aes(RIDAGEYR)) + 
+  geom_histogram(fill="red", color="black") + 
+  xlab("Age of Respondents") + 
+  ylab("Count of Respondents") + 
+  ggtitle("Age Distribution of Respondents")
+```
+
+### Race
+
+Non-Hispanic White and Non-Hispanic Black respondents are the two largest groups of respondents.
+
+```{r}
+ggplot(df, aes(RIDRETH3)) + 
+  geom_bar(fill="red", color="black", position = "identity") + 
+  xlab("Race of Respondents") +
+  ylab("Count of Respondents") +
+  ggtitle("Racial Distribution of Respondents")
+```
+
+### Country of Birth
+
+The vast majority of respondents were born in the United States.
+
+```{r}
+ggplot(df, aes(as.factor(DMDBORN4))) + 
+  geom_bar(fill="red", color="black", position = "identity") + 
+  xlab("Country of Birth") + 
+  ylab("Count of Respondents") +
+  ggtitle("Respondents' Country of Birth")
+```
+
+### Income-to-Poverty Ratio
+
+This is an interesting variable I wanted to include in this analysis. Per the CDC, "This variable is the ratio of family income to poverty. The Department of Health and Human Services (HHS) poverty guidelines were used as the poverty measure to calculate this ratio... INDFMPIR was calculated by dividing total annual family (or individual) income by the poverty guidelines specific to the survey year... INDFMPIR values at or above 5.00 were coded as 5.00 or more because of disclosure concerns."
+
+Around 850 respondents have a ratio value coded as 5.00, i.e., about 850 respondents are making 5 times the poverty threshold determined by HHS. There also seems to be a bell forming around a mean close to 1.00, which would indicate that a lot of respondents/respondents' families are only a little below or slightly above the poverty line.
+
+```{r}
+ggplot(df, aes(INDFMPIR)) + 
+  geom_histogram(fill="red", color="black") + 
+  xlab("Income-to-Poverty Ratio Distributions") + 
+  ylab("Count of Respondents") + 
+  ggtitle("Income-to-Poverty Ratio Distributions")
+```
+
+For the purposes of clustering, we are going to exclude these categorical variables for the sake of simplicity.
+
+## Cluster Analysis Using the Given Features
+
+We will start off by clustering using the given features of the data do determine whether or not we need to reduce dimensions.
+
+### Selecting k
+
+#### Within Sum of Squares
+
+We first need to determine what an optimal amount of clusters would be since we don't have a predetermined value for k. The package factoextra will generate a Within Sum of Squares plot suggesting the best values for k.
+
+```{r}
+set.seed(123)
+fviz_nbclust(df[ , 2:11], kmeans, nstart=10, k.max = 10, method = "wss")
+```
+
+There is a hard elbow at k = 2, suggesting that 2 is a good number of clusters for this data.
+
+#### Silhouette Widths
+
+We can also plot average silhouette widths for different numbers of clusters.
+
+```{r}
+fviz_nbclust(df[ , 2:11], kmeans, nstart=10, k.max = 10, method = "silhouette")
+```
+
+This suggests that the optimal number of clusters is also 2, so we will use k = 2 to create our cluster object.
+
+### Clustering, k=2
+
+```{r}
+set.seed(123)
+cluster = kmeans(df[ , 2:11], centers = 2, nstart = 10)
+```
+
+### Between SS -to- Within SS ratio
+
+After creating the cluster, we can check the ratio of Between Sum of Squares to total Within Sum of Squares. The entire objective of cluster analysis is to minimize [intra]{.ul}-cluster distances (Within Sum of Squares) and maximizing [inter]{.ul}-cluster distances (Between Sum of Squares). This means we want this ratio to be fairly high, as that would indicate how good *k*-means is at separating the clusters.
+
+```{r}
+cluster$betweenss / cluster$tot.withinss
+```
+
+This ratio is fairly low, which would suggest that the two clusters were not separated very well. And if we visualize the clusters...
+
+```{r}
+fviz_cluster(cluster, geom="point", data = df[, 2:11]) + 
+  ggtitle("K Means Clustering, Given Features, K=2")
+```
+
+...we can see that there is in fact some overlap between the clusters.
+
+### Clustering using given features: Conclusion
+
+So overall, clustering using the given features doesn't have great results. The silhouette widths for all cluster amounts are kind of low, the BetweenSS/WithinSS ratio is incredibly low, and the result is two clusters that don't have clear separation.
+
+## Cluster Analysis using PCA
+
+Since using the given features didn't work, we'll use Principal Component Analysis (PCA) to construct a new set of derivative features that capture a majority of the variation. These new variables will essentially be weighted averages of the original variables. I'll name the object "pca."
+
+```{r}
+pca = prcomp(df[ , 2:11])
+summary(pca)
+```
+
+Checking summary for pca, we see that the first two principal components cumulatively explain a majority of the variation.
+
+Let's extract both the rotation matrix (basically, the weights associated with each original variable within each new principal component) and the scores table (the newly constructed values for each principal component).
+
+```{r}
+### Create scores table
+scores = as.data.frame(pca$x) # the "x" table is the PCA scores
+head(scores)
+```
+
+```{r}
+### Observe weights from the rotation matrix
+rot = as.data.frame(pca$rotation)
+rot
+```
+
+### Selecting k
+
+Using the scores table as our new set of features, we can generate a plot of Total Within Sum of Squares like we did before and determine the optimal number of clusters.
+
+```{r}
+set.seed(123)
+fviz_nbclust(scores[ , 1:2], kmeans, nstart=10, k.max = 10, method = "wss")
+```
+
+The plot shows a sharp elbow at 2 and then a slightly more subtle bend at 4, indicated that the optimal number of clusters is probably within the 2-4 range. Given the nature of the data and the nuance we're trying to extract from this study, we'll try k=4.
+
+```{r}
+set.seed(123)
+cluster2 = kmeans(scores[ , 1:2], centers = 4, nstart = 10)
+```
+
+### Between SS -to- Within SS ratio
+
+If we observe the BetweenSS/WithinSS ratio ...
+
+```{r}
+cluster2$betweenss / cluster2$tot.withinss
+```
+
+... we see that the ratio using the new features is much higher than it was when we used the given features, indicating that there's better separation between the clusters.
+
+### Visualizing in 2D
+
+Let's visualize a scatter plot with the two principal components and k=4 clusters. I will add the cluster vector from the cluster object to the scores table so that we can color each observation by its assigned cluster.
+
+```{r}
+scores$cluster = as.character(cluster2$cluster)
+
+ggplot(scores, aes(x=PC1, y=PC2)) + 
+  geom_point(aes(color=cluster)) + 
+  scale_color_manual(values = c("red", "gold", "dark green", "blue")) + 
+  ggtitle("k-Means Clustering, Principal Components, K=4")
+```
+
+### Visualizing in 3D
+
+We can also use third principal component to visualize the clusters in 3 dimensions (I don't like this specific visualization as much but plotting in 3D is a fun exercise).
+
+```{r}
+plot_ly(data = scores, x=scores$PC1, y=scores$PC2, z=scores$PC3, color = scores$cluster)
+```
+
+### Clustering using PCA: Conclusion
+
+Using PCA resulted in much better separation between the clusters. This will allow us to evaluate the clusters and see if respondents were properly separated into appropriate groups based on their responses to the survey.
+
+## Evaluation and Interpretation
+
+First we'll create a new data frame called "survey" using the original features and adding the cluster labels as a new column.
+
+```{r}
+survey = cbind(df, cluster = cluster2$cluster)
+survey$cluster = as.factor(survey$cluster)
+```
+
+The next step I want to take is adding a column called PHQ9 Score. This represents a respondent's score on the depression module of the Patient Health Questionnaire ((Kroenke and Spitzer, 2002; Kroenke et al., 2001)). This was the nine-item depression screening that was administered to each interviewee, i.e., columns DPQ010 - DPQ090 in our dataset.
+
+```{r}
+survey$PHQ9_score = rowSums(survey[ , 2:10])
+```
+
+From here, we can use the PHQ-9 scores to categorize the severity of the respondents depressive symptoms based on established cut-off points:
+
+-   0-4: no depressive symptoms
+
+-   5-9: mild depressive symptoms
+
+-   10-14: moderate depressive symptoms
+
+-   15-19: moderately-severe depressive symptoms
+
+-   20-27: severe depressive symptoms
+
+We'll incorporate this logic into a new column, "Depressive Symptoms Category"
+
+```{r}
+survey$depressive_symptoms_cat = ""
+survey$depressive_symptoms_cat[survey$PHQ9_score >= 0 & survey$PHQ9_score<=4] <- "None"
+survey$depressive_symptoms_cat[survey$PHQ9_score >= 5 & survey$PHQ9_score<=9] <- "Mild"
+survey$depressive_symptoms_cat[survey$PHQ9_score >= 10 & survey$PHQ9_score<=14] <- "Moderate"
+survey$depressive_symptoms_cat[survey$PHQ9_score >= 15 & survey$PHQ9_score<=19] <- "Moderately-Severe"
+survey$depressive_symptoms_cat[survey$PHQ9_score >= 20 & survey$PHQ9_score<=27] <- "Severe"
+```
+
+### Visualization
+
+From there we can visualize the distribution of PHQ-9 scores per cluster and see which ranges/depressive symptom categories our clusters have been separated into.
+
+```{r}
+ggplot(survey, aes(cluster, PHQ9_score)) + 
+  geom_boxplot(outlier.color = "red") +
+  xlab("Clusters") + 
+  ylab("PHQ-9 Scores") +
+  ggtitle("Distribution of Questionnaire Scores per Cluster")
+```
+
+Based on the boxplots, we can tell that group 2 primarily contains respondents with no depressive symptoms, while group 3 primarily contains respondents with moderate to severe depressive symptoms, with a median at the moderately-severe cut-off point. So for the most part, our ultimate goal of isolating these respondents into a group was accomplished.
+
+## Analysis of Group 3 (Moderate-Severe Depressive Symptoms)
+
+If we want to go further, we can study the members of group 3 further to see what patterns from the demographic data and survey results we can observe. I'll create a data frame called "group3" with all the members of the third cluster.
+
+```{r}
+group3 = survey[ survey$cluster == 3 , ]
+```
+
+### Visualizations
+
+#### Age
+
+```{r}
+ggplot(data = group3, aes(RIDAGEYR)) + 
+  geom_histogram(fill="red", color="black") + 
+  geom_vline(xintercept = mean(group3$RIDAGEYR), linetype = "dashed", color="green") +
+  geom_vline(xintercept = mean(df$RIDAGEYR), linetype = "dashed", color="blue") +
+  ggtitle("Age Distribution of Respondents in Cluster 3") +
+  xlab("Age") +
+  ylab("Count of Respondents")
+```
+
+If we plot age, and include vertical lines representing the means of the original dataset (blue) and group 3 (green), we can see that the average age of respondents in group 3 is slightly younger than the average age of the entire sample.
+
+#### Income-to-Poverty Ratio
+
+```{r}
+ggplot(data = group3, aes(INDFMPIR)) + 
+  geom_histogram(fill="red", color="black") + 
+  geom_vline(xintercept = mean(group3$INDFMPIR), linetype = "dashed", color="green", size=1) +
+  geom_vline(xintercept = mean(df$INDFMPIR), linetype = "dashed", color="blue", size=1) +
+  ggtitle("Distribution of Income-to-Poverty Ratios for Cluster 3") + 
+  xlab("Income-to-Poverty Ratios") +
+  ylab("Count of Respondents")
+```
+
+In observing the family income-to-poverty ratio for group 3 respondents, we can see that the average ratio (green) is noticeably lower than the average for the entire sample (blue). A large proportion of respondents appear to be at and around the poverty threshold (a ratio of 1). The number of respondents in the 5th bin, representing a ratio less than 1 (i.e. family income that is [below]{.ul} the poverty line) is nearly equal to that of the last bin representing respondents who make 5+ times the poverty line. This seems to suggest something similar to studies that have made linkages between levels of depression and poverty.
+
+#### Depressive Symptoms
+
+We can visualize the distribution of respondents based on their scores...
+
+```{r}
+ggplot(group3, aes(PHQ9_score)) + 
+  geom_histogram(fill="red", color="black", binwidth = 1) + 
+  geom_vline(xintercept = mean(group3$PHQ9_score), linetype = "dashed", color="green", size=1) + 
+  ggtitle("Distribution of Questionnaire Scores for Cluster 3") +
+  xlab("Questionnaire Scores") +
+  ylab("Count of Respondents")
+```
+
+...and their respective depressive symptom categories.
+
+```{r}
+ggplot(group3, aes(depressive_symptoms_cat)) + 
+  geom_bar(fill="red", color="black", position = "identity") +
+  ggtitle("Categorization of Depressive Symptoms for Cluster 3") + 
+  xlab("Depressive Symptom Categories") + 
+  ylab("Count of Respondents")
+```
+
+We can see that the mean score of the group is greater than 15 (and the median is exactly 15), suggesting that the average person in this group displays moderately-severe depressive symptoms. With that said, the bar chart shows that largest proportion of respondents actually have moderate depressive symptoms.
+
+## Conclusion
+
+In conclusion, we practiced data processing, analysis and visualization, and cluster analysis using both given features and extracted features. We successfully (more or less) grouped respondents with moderate-to-severe depressive symptoms without having to label the observations. And through further analysis of this group we observed that these respondents were younger and closer to the poverty line, on average.
